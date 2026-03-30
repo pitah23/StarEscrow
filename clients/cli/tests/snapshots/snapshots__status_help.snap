@@ -1,0 +1,13 @@
+---
+source: clients/cli/tests/snapshots.rs
+expression: output
+---
+Usage: star-escrow status [OPTIONS] --contract-id <CONTRACT_ID>
+
+Options:
+      --contract-id <CONTRACT_ID>  [env: ESCROW_CONTRACT_ID=]
+      --json                       
+      --dry-run                    
+      --no-confirm                 
+      --verbose                    
+  -h, --help                       Print help

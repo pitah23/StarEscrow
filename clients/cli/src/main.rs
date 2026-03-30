@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Map, Value};
 use tabled::{Table, Tabled};
+use tracing::{debug, info, span, Level};
+use tracing_subscriber::EnvFilter;
 
 mod conf;
 mod deadline;
@@ -39,6 +41,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     no_confirm: bool,
+
+    #[arg(long, global = true)]
+    verbose: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -163,6 +168,19 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Initialize tracing subscriber
+    let filter = if cli.verbose { "debug" } else { "info" };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(filter))
+        )
+        .with_level(false)
+        .with_target(false)
+        .without_time()
+        .init();
+
     let cfg = conf::AppConfig::load(cli.config.as_deref())?;
     let (rpc_url, network_passphrase) = resolve_network(&cli, &cfg);
     let client = RpcClient::new(&rpc_url);
@@ -176,6 +194,7 @@ fn main() -> Result<()> {
         } => {
             let admin_addr = keypair::public_address_from_secret(&admin_secret)
                 .context("failed to derive admin address from ADMIN_SECRET")?;
+            info!(contract_id = %contract_id, admin = %admin_addr, fee_bps = %fee_bps, fee_collector = %fee_collector, "Initializing escrow contract");
             invoke_write(
                 &client,
                 &rpc_url,
@@ -232,6 +251,7 @@ fn main() -> Result<()> {
             let payer_addr = keypair::public_address_from_secret(&payer_secret)
                 .context("failed to derive payer address from PAYER_SECRET")?;
             let deadline_ts = parse_deadline(deadline)?;
+            info!(contract_id = %contract_id, payer = %payer_addr, freelancer = %freelancer, token = %token, amount = %amount, milestone = %milestone, deadline = ?deadline_ts, "Creating escrow");
             invoke_write(
                 &client,
                 &rpc_url,
@@ -288,7 +308,7 @@ fn main() -> Result<()> {
                 "Approve milestone and release payment to freelancer?",
                 cli.no_confirm,
             )? {
-                println!("Aborted.");
+                info!("Operation aborted by user");
                 return Ok(());
             }
             invoke_write(
@@ -308,7 +328,7 @@ fn main() -> Result<()> {
             payer_secret,
         } => {
             if !prompt::confirm("Cancel escrow and refund payer?", cli.no_confirm)? {
-                println!("Aborted.");
+                info!("Operation aborted by user");
                 return Ok(());
             }
             invoke_write(
@@ -338,6 +358,7 @@ fn main() -> Result<()> {
             cli.json,
         )?,
         Commands::Status { contract_id } => {
+            info!(contract_id = %contract_id, "Querying escrow status");
             let value = client.query_contract(
                 &contract_id,
                 "get_escrow",
@@ -354,6 +375,7 @@ fn main() -> Result<()> {
             }
         },
         Commands::List { contract_id, payer } => {
+            info!(contract_id = %contract_id, payer = %payer, "Listing escrows");
             let events = client.get_events(&contract_id)?;
             let filtered: Vec<Value> = events
                 .into_iter()
@@ -365,7 +387,7 @@ fn main() -> Result<()> {
                     serde_json::to_string_pretty(&json!({"escrows": filtered}))?
                 );
             } else {
-                println!(
+                info!(
                     "Escrows for payer {payer}:\n{}",
                     Table::new(
                         filtered
@@ -385,6 +407,7 @@ fn main() -> Result<()> {
             wasm,
             local_only,
         } => {
+            info!(contract_id = %contract_id, wasm = %wasm.display(), local_only = %local_only, "Verifying contract WASM hash");
             let local_hash = wasm_hash::hash_wasm_file(&wasm)?;
             if local_only {
                 output(
@@ -456,6 +479,11 @@ fn invoke_write(
     dry_run: bool,
     as_json: bool,
 ) -> Result<()> {
+    let span = span!(Level::INFO, "invoke_contract", contract_id, function, dry_run);
+    let _enter = span.enter();
+
+    debug!("Invoking contract function with args: {:?}", args);
+
     let response = client
         .invoke_contract(
             contract_id,
@@ -473,6 +501,8 @@ fn invoke_write(
         format!("Submitted {function}. Status: {}", response.status)
     };
 
+    info!(tx_hash = ?response.transaction_hash, status = %response.status, "Contract invocation result");
+
     output(
         as_json,
         json!({"status": response.status, "tx_hash": response.transaction_hash, "result": response.result}),
@@ -488,7 +518,7 @@ fn output(as_json: bool, data: Value, human: &str) {
             serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".to_string())
         );
     } else {
-        println!("{human}");
+        info!("{}", human);
     }
 }
 
@@ -507,9 +537,9 @@ fn print_status_table(value: &Value) {
                 value: v.to_string(),
             })
             .collect();
-        println!("{}", Table::new(rows));
+        info!("{}", Table::new(rows));
     } else {
-        println!("{value}");
+        info!("{value}");
     }
 }
 
