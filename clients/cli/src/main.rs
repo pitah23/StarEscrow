@@ -153,6 +153,13 @@ enum Commands {
         #[arg(long, env = "ESCROW_CONTRACT_ID")]
         contract_id: String,
     },
+    /// Watch a contract's status, polling periodically
+    Watch {
+        #[arg(long, env = "ESCROW_CONTRACT_ID")]
+        contract_id: String,
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+    },
     List {
         #[arg(long, env = "ESCROW_CONTRACT_ID")]
         contract_id: String,
@@ -169,7 +176,8 @@ enum Commands {
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize tracing subscriber
@@ -211,7 +219,8 @@ fn main() -> Result<()> {
                 ]),
                 cli.dry_run,
                 cli.json,
-            )?;
+            )
+            .await?;
         },
         Commands::Pause {
             contract_id,
@@ -226,7 +235,8 @@ fn main() -> Result<()> {
             Map::new(),
             cli.dry_run,
             cli.json,
-        )?,
+        )
+        .await?,
         Commands::Unpause {
             contract_id,
             admin_secret,
@@ -240,7 +250,8 @@ fn main() -> Result<()> {
             Map::new(),
             cli.dry_run,
             cli.json,
-        )?,
+        )
+        .await?,
         Commands::Create {
             contract_id,
             payer_secret,
@@ -271,7 +282,8 @@ fn main() -> Result<()> {
                 ]),
                 cli.dry_run,
                 cli.json,
-            )?;
+            )
+            .await?;
         },
         Commands::SubmitWork {
             contract_id,
@@ -286,7 +298,8 @@ fn main() -> Result<()> {
             Map::new(),
             cli.dry_run,
             cli.json,
-        )?,
+        )
+        .await?,
         Commands::TransferFreelancer {
             contract_id,
             freelancer_secret,
@@ -301,16 +314,22 @@ fn main() -> Result<()> {
             args(&[("new_freelancer", json!(new_freelancer))]),
             cli.dry_run,
             cli.json,
-        )?,
+        )
+        .await?,
         Commands::Approve {
             contract_id,
             payer_secret,
         } => {
-            if !prompt::confirm(
-                "Approve milestone and release payment to freelancer?",
-                cli.no_confirm,
-            )? {
-                info!("Operation aborted by user");
+            let confirmed: bool = tokio::task::spawn_blocking(move || {
+                prompt::confirm(
+                    "Approve milestone and release payment to freelancer?",
+                    cli.no_confirm,
+                )
+            })
+            .await
+            .expect("spawn_blocking failed")?;
+            if !confirmed {
+                println!("Aborted.");
                 return Ok(());
             }
             invoke_write(
@@ -323,14 +342,20 @@ fn main() -> Result<()> {
                 Map::new(),
                 cli.dry_run,
                 cli.json,
-            )?;
+            )
+            .await?;
         },
         Commands::Cancel {
             contract_id,
             payer_secret,
         } => {
-            if !prompt::confirm("Cancel escrow and refund payer?", cli.no_confirm)? {
-                info!("Operation aborted by user");
+            let confirmed: bool = tokio::task::spawn_blocking(move || {
+                prompt::confirm("Cancel escrow and refund payer?", cli.no_confirm)
+            })
+            .await
+            .expect("spawn_blocking failed")?;
+            if !confirmed {
+                println!("Aborted.");
                 return Ok(());
             }
             invoke_write(
@@ -343,7 +368,8 @@ fn main() -> Result<()> {
                 Map::new(),
                 cli.dry_run,
                 cli.json,
-            )?;
+            )
+            .await?;
         },
         Commands::Expire {
             contract_id,
@@ -358,15 +384,12 @@ fn main() -> Result<()> {
             Map::new(),
             cli.dry_run,
             cli.json,
-        )?,
+        )
+        .await?,
         Commands::Status { contract_id } => {
-            info!(contract_id = %contract_id, "Querying escrow status");
-            let value = client.query_contract(
-                &contract_id,
-                "get_escrow",
-                &Map::new(),
-                &network_passphrase,
-            )?;
+            let value = client
+                .query_contract(&contract_id, "get_escrow", &Map::new(), &network_passphrase)
+                .await?;
             if cli.json {
                 println!(
                     "{}",
@@ -376,9 +399,22 @@ fn main() -> Result<()> {
                 print_status_table(&value);
             }
         },
+        Commands::Watch { contract_id, interval } => {
+            let mut interval = interval;
+            loop {
+                let value = client
+                    .query_contract(&contract_id, "get_escrow", &Map::new(), &network_passphrase)
+                    .await?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&json!({"status": "ok", "escrow": value}))?);
+                } else {
+                    print_status_table(&value);
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+            }
+        },
         Commands::List { contract_id, payer } => {
-            info!(contract_id = %contract_id, payer = %payer, "Listing escrows");
-            let events = client.get_events(&contract_id)?;
+            let events = client.get_events(&contract_id).await?;
             let filtered: Vec<Value> = events
                 .into_iter()
                 .filter(|e| e.to_string().contains(&payer))
@@ -418,7 +454,7 @@ fn main() -> Result<()> {
                     &format!("Local hash: {local_hash}"),
                 );
             } else {
-                let remote_hash = client.get_contract_wasm_hash(&contract_id)?;
+                let remote_hash = client.get_contract_wasm_hash(&contract_id).await?;
                 output(
                     cli.json,
                     json!({"local_hash": local_hash, "remote_hash": remote_hash, "match": local_hash.eq_ignore_ascii_case(&remote_hash)}),
@@ -470,7 +506,7 @@ fn parse_deadline(deadline: Option<String>) -> Result<Option<u64>> {
     }
 }
 
-fn invoke_write(
+async fn invoke_write(
     client: &RpcClient,
     _rpc_url: &str,
     network_passphrase: &str,
@@ -495,12 +531,8 @@ fn invoke_write(
             network_passphrase,
             dry_run,
         )
-        .map_err(|e| {
-            CliError::command_error(format!(
-                "operation '{}' failed for contract {}: {}",
-                function, contract_id, e
-            ))
-        })?;
+        .await
+        .with_context(|| format!("operation '{function}' failed for contract {contract_id}"))?;
 
     let human = if dry_run {
         format!("Simulated {function}. Status: {}", response.status)
