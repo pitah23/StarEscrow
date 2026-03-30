@@ -1,5 +1,6 @@
 ---
 source: clients/cli/tests/snapshots.rs
+assertion_line: 30
 expression: output
 ---
 Usage: star-escrow status [OPTIONS] --contract-id <CONTRACT_ID>
@@ -9,5 +10,4 @@ Options:
       --json                       
       --dry-run                    
       --no-confirm                 
-      --verbose                    
   -h, --help                       Print help

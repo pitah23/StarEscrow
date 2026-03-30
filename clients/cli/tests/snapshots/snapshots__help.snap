@@ -1,5 +1,6 @@
 ---
 source: clients/cli/tests/snapshots.rs
+assertion_line: 24
 expression: output
 ---
 Usage: star-escrow [OPTIONS] <COMMAND>
@@ -27,6 +28,5 @@ Options:
       --json                                     
       --dry-run                                  
       --no-confirm                               
-      --verbose                                  
   -h, --help                                     Print help
   -V, --version                                  Print version
